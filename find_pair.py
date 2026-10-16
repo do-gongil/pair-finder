@@ -2,8 +2,10 @@
 
 사용법:
   python find_pair.py                # 실시간 화면 감시 (시작 시 게임 영역 드래그 지정)
+  python find_pair.py --roi 100,200,558,700  # 영역 드래그 생략 (드래그 선택 시 출력되는 x,y,w,h)
+  python find_pair.py --threshold 0.7        # 유사도 기준 변경 (기본 0.8)
   python find_pair.py --video v.mp4  # 녹화 영상으로 테스트
-  python find_pair.py --selftest     # video.mp4 기준 회귀 체크
+  python find_pair.py --selftest     # video.mp4 기준 회귀 체크 (video.mp4는 저장소에 없음)
 """
 import argparse
 import itertools
@@ -16,7 +18,7 @@ BASE_W = 558  # 파라미터 튜닝 기준 해상도(video.mp4 폭). ROI 폭에 
 MIN_SIM = 0.8
 
 
-def find_pair(img):
+def find_pair(img, min_sim=MIN_SIM):
     """보드가 보이면 ((x1,y1),(x2,y2)), 유사도 반환. 아니면 None."""
     scale = img.shape[1] / BASE_W
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -43,7 +45,7 @@ def find_pair(img):
                   cv2.matchTemplate(b2, s1, cv2.TM_CCOEFF_NORMED).max())
         if sim > best:
             best, pair = sim, (p1, p2)
-    if best < MIN_SIM:
+    if best < min_sim:
         return None
     return pair, best
 
@@ -59,23 +61,38 @@ def frames_from_video(path):
         yield frame
 
 
-def frames_from_screen():
+def parse_roi(text):
+    """'x,y,w,h' → (x, y, w, h). argparse type 함수."""
+    try:
+        x, y, w, h = (int(v) for v in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError("x,y,w,h 형식의 정수 4개가 필요합니다") from None
+    if x < 0 or y < 0 or w <= 0 or h <= 0:
+        raise argparse.ArgumentTypeError("x,y >= 0, w,h > 0 이어야 합니다")
+    return x, y, w, h
+
+
+def frames_from_screen(roi=None):
     import mss
     with mss.mss() as sct:
         mon = sct.monitors[1]
-        full = np.ascontiguousarray(np.array(sct.grab(mon))[:, :, :3])
-        title = "게임 영역을 드래그 후 ENTER"
-        x, y, w, h = cv2.selectROI(title, full, showCrosshair=False)
-        cv2.destroyWindow(title)
-        if not w or not h:
-            sys.exit("영역이 지정되지 않았습니다.")
+        if roi:
+            x, y, w, h = roi
+        else:
+            full = np.ascontiguousarray(np.array(sct.grab(mon))[:, :, :3])
+            title = "게임 영역을 드래그 후 ENTER"
+            x, y, w, h = cv2.selectROI(title, full, showCrosshair=False)
+            cv2.destroyWindow(title)
+            if not w or not h:
+                sys.exit("영역이 지정되지 않았습니다.")
+            print(f"선택한 영역: --roi {x},{y},{w},{h}")
         box = {"left": mon["left"] + x, "top": mon["top"] + y,
                "width": w, "height": h}
         while True:
             yield np.ascontiguousarray(np.array(sct.grab(box))[:, :, :3])
 
 
-def watch(frames, delay_ms):
+def watch(frames, delay_ms, min_sim=MIN_SIM):
     win = "pair finder (q: 종료)"
     prev_small, result = None, None
     for img in frames:
@@ -84,7 +101,7 @@ def watch(frames, delay_ms):
         # 화면이 바뀐 프레임에서만 검출 실행 (보드는 클릭 전까지 정지 화면)
         small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (64, 64))
         if prev_small is None or cv2.absdiff(small, prev_small).mean() > 2:
-            result = find_pair(img)
+            result = find_pair(img, min_sim)
         prev_small = small
         view = img.copy()
         if result:
@@ -129,17 +146,24 @@ def selftest(video):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--video", help="화면 대신 영상 파일을 입력으로 사용")
     ap.add_argument("--selftest", action="store_true",
                     help="video.mp4로 검출 로직 회귀 체크")
+    ap.add_argument("--threshold", type=float, default=MIN_SIM,
+                    help=f"같은 아이콘으로 볼 최소 유사도 (기본 {MIN_SIM})")
+    ap.add_argument("--roi", type=parse_roi, metavar="x,y,w,h",
+                    help="게임 영역 x,y,w,h 를 직접 지정해 드래그 선택 생략 "
+                         "(드래그 선택 후 출력되는 값과 같은 좌표계)")
     args = ap.parse_args()
     if args.selftest:
         selftest(args.video or "video.mp4")
     elif args.video:
-        watch(frames_from_video(args.video), delay_ms=33)
+        watch(frames_from_video(args.video), delay_ms=33, min_sim=args.threshold)
     else:
-        watch(frames_from_screen(), delay_ms=30)  # 평시 틱 비용 ~0.3ms라 30ms로 촘촘히
+        # 평시 틱 비용 ~0.3ms라 30ms로 촘촘히
+        watch(frames_from_screen(args.roi), delay_ms=30, min_sim=args.threshold)
 
 
 if __name__ == "__main__":
